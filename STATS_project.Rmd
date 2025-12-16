@@ -1,0 +1,380 @@
+---
+title: "Project Code - .Rmd file"
+author: "Ishwari Dawkhar"
+date: "2025-12-15"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+
+
+STEP 1 : 
+
+data ingestion (judicial.csv consists of all the cases, their case IDs and their precomuted scores)
+
+```{r}
+
+data <- read.csv("judicial.csv", stringsAsFactors = FALSE)
+head(data)
+```
+data ingestion (allcites.txt contains edges in the network)
+
+```{r}
+allcites <- read.table("allcites.txt", header = FALSE, stringsAsFactors = FALSE)
+colnames(allcites) <- c("caseid_citingcase", "caseid_citedcase")
+head(allcites)
+```
+
+```{r}
+#To understand time range of the data
+summary(data$year)
+```
+
+```{r}
+#adding the cited_year and citing_year to citation data. The year is needed for filtering citations later
+case_years <- data$year
+names(case_years) <- data$caseid
+
+allcites$citing_year <- case_years[allcites$caseid_citingcase]
+allcites$cited_year  <- case_years[allcites$caseid_citedcase]
+
+head(allcites)
+```
+
+TEST 1 : (calculating scores for first 20 cases)
+
+```{r}
+## building functions 
+
+##adjacency matrix function 
+adj_matrix_func <- function(test_sub){
+  cases_test <- sort(unique(c(test_sub$caseid_citingcase, test_sub$caseid_citedcase)))
+  
+  #mapping case IDs to matrix rows and columns 
+  case_index <- seq_along(cases_test)
+  names(case_index) <- cases_test
+  
+  #assigning row and column values 
+  rows <- case_index[as.character(test_sub$caseid_citingcase)] 
+  cols <- case_index[as.character(test_sub$caseid_citedcase)]
+  
+  #creating adjacency matrix 
+  A_test <- matrix(0, nrow = length(cases_test), ncol = length(cases_test))
+  A_test[cbind(rows, cols)] <- 1
+  
+  return (A_test)
+}
+
+```
+
+```{r}
+## function to calculate hub scores and authority scores
+score_calc_func <- function(A_test,max_iterations,tol){
+  n <- nrow(A_test)
+  h <- rep(1, n)   # initial hub scores
+  a <- rep(1, n)   # initial authority scores
+  
+  for (iter in 1:max_iterations) {
+    
+    a_new <- normalize_func(t(A_test) %*% h)
+    h_new <- normalize_func(A_test %*% a_new)
+    
+    # checking convergence
+    if (max(abs(a_new - a)) < tol && max(abs(h_new - h)) < tol) {
+      return(list(authority_score = a_new, hub_score = h_new, iterations = iter))
+    }
+    
+    a <- a_new
+    h <- h_new
+  }
+  
+  return(list(authority_score = a, hub_score = h, iterations = max_iterations))
+}
+  
+```
+
+```{r}
+##function to normalize the calculated scores
+normalize_func <- function(x){
+  return(x / sqrt(sum(x^2)))
+}
+```
+
+```{r}
+##function to validate scores 
+val_func_subset <- function(subset_test_data, a, h) {
+  subset_test_data$computed_auth <- a
+  subset_test_data$computed_hub  <- h
+  
+  auth_cor <- cor(subset_test_data$auth, subset_test_data$computed_auth)
+  hub_cor  <- cor(subset_test_data$hub, subset_test_data$computed_hub)
+  
+  list(
+    compare = subset_test_data,
+    authority_correlation = auth_cor,
+    hub_correlation = hub_cor
+  )
+}
+```
+
+TEST CASE 1 : Checking the scores for first 20 cases 
+```{r}
+
+#test adj matrix logic on subset of citations data 
+test_sub <- allcites[1:20, ]
+A_test <- adj_matrix_func(test_sub)
+
+test_run <- score_calc_func(A_test, max_iterations = 100, tol = 1e-6)
+cases_test <- sort(unique(c(test_sub$caseid_citingcase, test_sub$caseid_citedcase)))
+
+subset_test_data <- data.frame(
+  caseid = cases_test,
+  auth   = runif(length(cases_test)),  
+  hub    = runif(length(cases_test))
+)
+
+validation <- val_func_subset(
+  subset_test_data,
+  a = test_run$authority_score,
+  h = test_run$hub_score
+)
+validation$authority_correlation
+validation$hub_correlation
+
+```
+
+The correlations are extremely low because the test subset is tiny and incomplete.
+With only the first 20 cases in account for this test, the hub scores in the dataset are calculated based on the whole network and not a subset of data. 
+
+Solution: pivoting to using 'Sparse matrix' instead of a refular matrix to compute the adjacency matrix of the entire citation network. 
+
+OBJECTIVE 1 : calculating correct authority and hub scores  
+
+```{r}
+#declaring cases and sparse matrix as a global variable 
+cases <- sort(unique(c(allcites$caseid_citingcase, allcites$caseid_citedcase)))
+
+# using rows and columns to build a sparse matrix
+# creating a sparse adj matrix function
+
+library(Matrix)
+
+rows <- match(allcites$caseid_citingcase, cases)
+cols <- match(allcites$caseid_citedcase, cases)
+
+A_sparse <<- sparseMatrix(
+  i = rows,
+  j = cols,
+  x = 1,
+  dims = c(length(cases), length(cases))
+)
+```
+
+
+```{r}
+## tweaking the HITS algorthim function 
+score_calc_func <- function(A_sparse,max_iterations,tol){
+  n <- nrow(A_sparse)
+  h <- rep(1, n)   
+  a <- rep(1, n)   
+  
+  for (iter in 1:max_iterations) {
+    
+    a_new <- normalize_func(t(A_sparse) %*% h)
+    h_new <- normalize_func(A_sparse %*% a_new)
+    
+    # checking convergence before updating
+    if (max(abs(a_new - a)) < tol && max(abs(h_new - h)) < tol) {
+      return(list(authority_score = a_new, hub_score = h_new, iterations = iter))
+    }
+    
+    a <- a_new
+    h <- h_new
+  }
+  
+  return(list(authority_score = a, hub_score = h, iterations = max_iterations))
+}
+```
+
+
+```{r}
+##function to normalize the calculated scores
+normalize_func <- function(x){
+  return(x / sqrt(sum(x^2)))
+}
+```
+
+
+```{r}
+##function to validate scores 
+validate_func_subset <- function(case_subset, a_vec, h_vec, cases) {
+  index_positions <- match(case_subset$caseid, cases)
+  
+  # extracting computed scores 
+  computed_auth <- a_vec[index_positions]
+  computed_hub  <- h_vec[index_positions]
+  
+  result <- data.frame(
+    caseid        = case_subset$caseid,
+    parties       = case_subset$parties,
+    computed_auth_score = computed_auth,
+    original_auth_score = case_subset$auth,
+    computed_hub_score  = computed_hub,
+    original_hub_score  = case_subset$hub
+  )
+  
+  list(
+    result_df = result
+  )
+}
+
+```
+
+TEST CASE 1 : Calculating scores for Roe v. Wade and validating them with actual scores 
+```{r}
+roe_cases <- data[grep("Roe v. Wade", data$parties, ignore.case = TRUE), ]
+roe_index <- which(cases == 25347)  # case ID for Roe v. Wade 
+
+#calculating scores for the entire network  
+full_scores <- score_calc_func(A_sparse, max_iterations = 100, tol = 1e-6)
+
+# Extracting the computed scores of  HITS algorithm
+authority_roe <- full_scores$authority_score[roe_index]
+hub_roe       <- full_scores$hub_score[roe_index]
+
+#calling validation function to confirm values for Roe V. Wade 
+validation_roe <- validate_func_subset(
+  roe_cases,
+  full_scores$authority_score,
+  full_scores$hub_score,
+  cases
+)
+validation_roe
+```
+
+TEST CASE 2 : Calculating scores for Brown v. Board of Education and validating them with actual scores
+```{r}
+brown_cases <- data[grep("Brown v. Board of Education", data$parties, ignore.case = TRUE), ]
+brown_index <- which(cases == 20919)  # case ID for Brown v. Board of Education
+
+#calculating scores for the entire network  
+full_scores <- score_calc_func(A_sparse, max_iterations = 100, tol = 1e-6)
+
+# Extracting the computed scores of  HITS algorithm
+authority_brown <- full_scores$authority_score[roe_index]
+hub_brown       <- full_scores$hub_score[roe_index]
+
+#calling validation function to confirm values for Brown v. Board of Education
+validation_brown <- validate_func_subset(
+  roe_cases,
+  full_scores$authority_score,
+  full_scores$hub_score,
+  cases
+)
+validation_brown
+```
+
+TEST CASE 3 : Calculating scores for Miranda v. Arizona and validating them with actual scores
+
+```{r}
+miranda_cases <- data[grep("Miranda v. Arizona", data$parties, ignore.case = TRUE), ]
+miranda_index <- which(cases == 23601)  # case ID for Miranda v. Arizona
+
+#calculating scores for the entire network  
+full_scores <- score_calc_func(A_sparse, max_iterations = 100, tol = 1e-6)
+
+# Extracting the computed scores of  HITS algorithm
+authority_miranda <- full_scores$authority_score[miranda_index]
+hub_miranda       <- full_scores$hub_score[miranda_index]
+
+#calling validation function to confirm values for Miranda v. Arizona
+validation_miranda <- validate_func_subset(
+  miranda_cases,
+  full_scores$authority_score,
+  full_scores$hub_score,
+  cases
+)
+validation_miranda
+```
+
+Replicating results from paper 
+
+Objective 2 : Plotting trends of authority and hub scores over the years for influential 5th Amendment cases (recreating fig 10)
+
+```{r}
+
+yearly_authority_trend <- function(caseid, allcites, cases, A_sparse) {
+  
+  years <- 1940:2002   #for recreating time acc. to the fig 10
+  authority_scores <- numeric(length(years))
+  
+  for (i in seq_along(years)) {
+    yr <- years[i]
+    
+    # Cases active up to this year
+    yearly_cases <- sort(unique(c(
+      allcites$caseid_citingcase[allcites$citing_year <= yr],
+      allcites$caseid_citedcase[allcites$cited_year <= yr]
+    )))
+    
+    indices <- match(yearly_cases, cases)
+    
+    # Slice sparse matrix 
+    A_sub <- A_sparse[indices, indices]
+    
+    #calling function to calculate the authority scores 
+    scores <- score_calc_func(A_sub, max_iterations = 100, tol = 1e-6)
+    
+    #including cases only relevant to the network of each caseid 
+    case_idx <- which(yearly_cases == caseid)
+    
+    authority_scores[i] <- ifelse(
+      length(case_idx) == 0,
+      NA,
+      scores$authority_score[case_idx]
+    )
+  }
+  
+  data.frame(year = years, authority = authority_scores)
+}
+```
+
+Plotting the authority scores from their respective start years till the last used for each 5th Amendment cases (recreating Fig. 10)
+
+```{r}
+
+brown_trend  <- yearly_authority_trend(18501, allcites, cases, A_sparse)
+miranda_trend   <- yearly_authority_trend(23601, allcites, cases, A_sparse)
+escobedo_trend <- yearly_authority_trend(23115, allcites, cases, A_sparse)
+ri_trend   <- yearly_authority_trend(26918, allcites, cases, A_sparse)
+
+plot(brown_trend$year, brown_trend$authority, type = "l",
+     lwd = 2, lty = 3,            
+     xlab = "Year", ylab = "Authority Score",
+     xaxt = "n")
+
+lines(miranda_trend$year, miranda_trend$authority,
+      lwd = 2, lty = 1)            
+
+lines(escobedo_trend$year, escobedo_trend$authority,
+      lwd = 2, lty = 2)           
+
+lines(ri_trend$year, ri_trend$authority,
+      lwd = 2, lty = 4)           
+
+axis(1, at = seq(1940, 2000, by = 10))
+
+legend("topleft",
+       legend = c("Brown v. Mississippi",
+                  "Miranda v. Arizona",
+                  "Escobedo v. Illinois",
+                  "R.I. v. Innis"),
+       lty = c(3, 1, 2, 4),
+       lwd = 2)
+
+
+```
+
+
+
